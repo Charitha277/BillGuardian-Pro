@@ -39,7 +39,8 @@ To bring transparency and fairness to hospital billing systems using intelligent
 ---
 
 ### 📷 Demo
-(Add screenshot here if available)
+<img width="1864" height="902" alt="image" src="https://github.com/user-attachments/assets/e4bc3a7e-4cfb-454d-9e3f-935a99215757" />
+
 
 ---
 
