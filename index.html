@@ -206,9 +206,9 @@ X-Ray"></textarea>
             </div>
 
             <div class="tabs">
-                <button class="tab active" onclick="switchTab('items')">📋 All Items</button>
-                <button class="tab" onclick="switchTab('issues')">⚠️ Issues & Flags</button>
-                <button class="tab" onclick="switchTab('prices')">💰 Price Comparison</button>
+                <button class="tab active" onclick="switchTab('items', event)">📋 All Items</button>
+                <button class="tab" onclick="switchTab('issues', event)">⚠️ Issues & Flags</button>
+                <button class="tab" onclick="switchTab('prices', event)">💰 Price Comparison</button>
             </div>
 
             <div id="itemsTab" class="tab-content active">
@@ -337,11 +337,11 @@ X-Ray"></textarea>
             const items = [];
             const lines = text.split('\n');
             const patterns = [
-                /([A-Za-z\s]+?)\s*[-:]\s*Rs\.?\s*(\d+)/i,
-                /([A-Za-z\s]+?)\s*[-:]\s*(\d+)\s*Rs\.?/i,
-                /([A-Za-z\s]+?)\s*@\s*Rs\.?\s*(\d+)/i,
-                /([A-Za-z\s]+?)\s*:\s*(\d+)/i,
-                /([A-Za-z\s]+?)\s+(\d+)\s*$/i
+                /([A-Za-z\s]+?)\s*[-:]\s*Rs\.?\s*(\d+(?:\.\d+)?)/i,
+                /([A-Za-z\s]+?)\s*[-:]\s*(\d+(?:\.\d+)?)\s*Rs\.?/i,
+                /([A-Za-z\s]+?)\s*@\s*Rs\.?\s*(\d+(?:\.\d+)?)/i,
+                /([A-Za-z\s]+?)\s*:\s*(\d+(?:\.\d+)?)/i,
+                /([A-Za-z\s]+?)\s+(\d+(?:\.\d+)?)\s*$/i
             ];
             for (const line of lines) {
                 if (!line.trim()) continue;
@@ -351,22 +351,32 @@ X-Ray"></textarea>
                         let name = match[1].trim();
                         let price = parseFloat(match[2]);
                         name = name.replace(/^[^A-Za-z]+/, '').trim();
-                        if (name.length > 2 && price > 0 && price < 100000) {
-                            items.push({ name, price, original: line });
-                            break;
-                        }
+                        if (
+    name.length > 3 &&
+    price > 0 &&
+    price < 100000 &&
+    !name.toLowerCase().includes("oct") &&
+    !name.toLowerCase().includes("date") &&
+    !name.toLowerCase().includes("bill") &&
+    !/^\d+$/.test(name)
+) {
+    items.push({
+        name: name,
+        price: price
+    });
+}
                     }
                 }
             }
-            // Merge similar names (case-insensitive)
-            const merged = [];
             const map = new Map();
             for (const item of items) {
                 const key = item.name.toLowerCase();
                 if (map.has(key)) {
-                    map.get(key).price += item.price;
+                    const existing = map.get(key);
+                    existing.price += item.price;
+                    existing.count += 1;
                 } else {
-                    map.set(key, { name: item.name, price: item.price });
+                    map.set(key, { name: item.name, price: item.price, count: 1 });
                 }
             }
             return Array.from(map.values());
@@ -390,9 +400,6 @@ X-Ray"></textarea>
         // Main analysis with all features
         function analyzeText() {
             const text = document.getElementById('billText').value;
-            const expectedRaw = document.getElementById('expectedItems').value;
-            const diagnosis = document.getElementById('diagnosis').value;
-            const hospital = document.getElementById('hospitalName').value.toLowerCase();
 
             if (!text.trim()) {
                 alert('No bill text to analyze.');
@@ -403,140 +410,158 @@ X-Ray"></textarea>
             document.getElementById('results').classList.remove('active');
 
             setTimeout(() => {
-                let items = parseBillText(text);
+                const items = parseBillText(text);
+
                 if (items.length === 0) {
-                    alert('Could not extract items. Use format like "ICU CHARGES - Rs.5500"');
+                    alert('Could not extract items.');
                     document.getElementById('loading').classList.remove('active');
                     return;
                 }
 
-                // 1. Price overcharge detection
+                const expectedItems = document.getElementById('expectedItems').value
+                    .split('\n')
+                    .map(item => item.trim().toLowerCase())
+                    .filter(Boolean);
+                const diagnosis = document.getElementById('diagnosis').value;
+                const diagnosisExpected = diagnosis ? DIAGNOSIS_EXPECTED[diagnosis] || [] : [];
+
+                let totalBilled = items.reduce((s, i) => s + i.price, 0);
+
+                const itemsWithStatus = [];
+                const issues = [];
+                const priceComparisons = [];
                 let totalOvercharge = 0;
                 let overpricedCount = 0;
-                const priceComparisons = [];
+                let duplicateCount = 0;
+                let suspiciousCount = 0;
+                let diagnosisMismatchCount = 0;
+
                 for (const item of items) {
+                    const normalized = item.name.toLowerCase();
                     const range = getPriceRange(item.name);
-                    if (range) {
-                        const overcharge = Math.max(0, item.price - range.max);
-                        if (overcharge > 0) {
-                            totalOvercharge += overcharge;
-                            overpricedCount++;
-                        }
-                        priceComparisons.push({
-                            name: item.name,
-                            price: item.price,
-                            min: range.min,
-                            max: range.max,
-                            overcharge: overcharge,
-                            status: overcharge > 0 ? 'overpriced' : (item.price < range.min ? 'underpriced' : 'normal')
-                        });
-                    } else {
-                        priceComparisons.push({ name: item.name, price: item.price, min: null, max: null, overcharge: 0, status: 'unknown' });
-                    }
-                }
-
-                // 2. Duplicate detection
-                const nameCount = new Map();
-                items.forEach(i => nameCount.set(i.name.toLowerCase(), (nameCount.get(i.name.toLowerCase()) || 0) + 1));
-                const duplicates = items.filter(i => nameCount.get(i.name.toLowerCase()) > 1);
-                const uniqueDuplicates = [...new Map(duplicates.map(d => [d.name.toLowerCase(), d])).values()];
-
-                // 3. Suspicious keyword detection
-                const suspicious = items.filter(i => SUSPICIOUS_KEYWORDS.some(k => i.name.toLowerCase().includes(k)));
-
-                // 4. Expected items mismatch
-                const expectedItems = expectedRaw ? expectedRaw.toLowerCase().split('\n').filter(l => l.trim()) : [];
-                const missingFromExpected = [];
-                const extraNotExpected = [];
-                if (expectedItems.length > 0) {
-                    for (const exp of expectedItems) {
-                        const found = items.some(i => i.name.toLowerCase().includes(exp) || exp.includes(i.name.toLowerCase()));
-                        if (!found) missingFromExpected.push(exp);
-                    }
-                    for (const item of items) {
-                        const found = expectedItems.some(exp => item.name.toLowerCase().includes(exp) || exp.includes(item.name.toLowerCase()));
-                        if (!found) extraNotExpected.push(item);
-                    }
-                }
-
-                // 5. Diagnosis-based mismatch
-                let diagnosisMismatch = [];
-                if (diagnosis && DIAGNOSIS_EXPECTED[diagnosis]) {
-                    const expectedForDiag = DIAGNOSIS_EXPECTED[diagnosis];
-                    for (const item of items) {
-                        const lowerItem = item.name.toLowerCase();
-                        const isRelevant = expectedForDiag.some(exp => lowerItem.includes(exp));
-                        if (!isRelevant && !SUSPICIOUS_KEYWORDS.some(k => lowerItem.includes(k))) {
-                            diagnosisMismatch.push({ name: item.name, price: item.price, reason: `Not typical for ${diagnosis} diagnosis` });
-                        }
-                    }
-                }
-
-                // 6. Round number flag
-                const roundNumberItems = items.filter(i => isSuspiciousRoundNumber(i.price));
-
-                // 7. Hospital blacklist (example)
-                const blacklistHospitals = ['apollo', 'fortis', 'max']; // just example, you can add more
-                const hospitalFlag = blacklistHospitals.some(h => hospital.includes(h));
-
-                // Build issues list
-                const issues = [];
-                if (overpricedCount > 0) issues.push({ severity: 'high', text: `${overpricedCount} item(s) overcharged by ₹${totalOvercharge}` });
-                if (uniqueDuplicates.length > 0) issues.push({ severity: 'medium', text: `${uniqueDuplicates.length} duplicate charge(s) detected` });
-                if (suspicious.length > 0) issues.push({ severity: 'high', text: `${suspicious.length} suspicious/unnecessary charge(s): ${suspicious.map(s => s.name).join(', ')}` });
-                if (extraNotExpected.length > 0) issues.push({ severity: 'medium', text: `${extraNotExpected.length} item(s) not in your expected list: ${extraNotExpected.map(e => e.name).join(', ')}` });
-                if (missingFromExpected.length > 0) issues.push({ severity: 'low', text: `Missing expected items: ${missingFromExpected.join(', ')}` });
-                if (diagnosisMismatch.length > 0) issues.push({ severity: 'medium', text: `${diagnosisMismatch.length} item(s) may be irrelevant for your diagnosis` });
-                if (roundNumberItems.length > 0) issues.push({ severity: 'low', text: `Suspicious round-number charges: ${roundNumberItems.map(r => `${r.name} (₹${r.price})`).join(', ')}` });
-                if (hospitalFlag) issues.push({ severity: 'medium', text: `This hospital has been flagged for potential overcharging in user reports` });
-
-                // Fraud score (0-100)
-                let fraudScore = 0;
-                fraudScore += Math.min(40, overpricedCount * 10);
-                fraudScore += Math.min(20, uniqueDuplicates.length * 10);
-                fraudScore += Math.min(20, suspicious.length * 10);
-                fraudScore += Math.min(10, extraNotExpected.length * 5);
-                fraudScore += Math.min(10, diagnosisMismatch.length * 3);
-                fraudScore = Math.min(100, fraudScore);
-
-                const riskLevel = fraudScore >= 60 ? '🔴 HIGH RISK - Significant fraud indicators' : (fraudScore >= 30 ? '🟠 MEDIUM RISK - Review recommended' : '🟢 LOW RISK - Bill appears clean');
-
-                const totalBilled = items.reduce((s, i) => s + i.price, 0);
-
-                // Prepare items with status
-                const itemsWithStatus = items.map(item => {
-                    const lower = item.name.toLowerCase();
                     let status = 'normal';
-                    let reason = '';
-                    if (suspicious.includes(item)) { status = 'extra'; reason = 'Suspicious/unnecessary charge'; }
-                    else if (uniqueDuplicates.some(d => d.name.toLowerCase() === lower)) { status = 'duplicate'; reason = 'Billed multiple times'; }
-                    else if (priceComparisons.find(p => p.name === item.name && p.overcharge > 0)) { status = 'overcharge'; reason = `Overpriced (should be ≤ ₹${priceComparisons.find(p => p.name === item.name).max})`; }
-                    else if (extraNotExpected.includes(item)) { status = 'extra'; reason = 'Not in your expected treatment list'; }
-                    else if (diagnosisMismatch.some(d => d.name === item.name)) { status = 'extra'; reason = `Not typical for selected diagnosis`; }
-                    else { reason = 'Appears normal'; }
-                    return { ...item, status, reason, expectedMax: priceComparisons.find(p => p.name === item.name)?.max || null };
-                });
+                    let reason = 'Normal charge';
+                    let overchargeAmount = 0;
+
+                    if (item.count > 1) {
+                        status = 'duplicate';
+                        reason = `Repeated ${item.count}x charge(s)`;
+                        duplicateCount += 1;
+                    }
+
+                    if (range && item.price > range.max) {
+                        status = 'overcharge';
+                        reason = `Above expected max of ₹${range.max}`;
+                        overchargeAmount = item.price - range.max;
+                        totalOvercharge += overchargeAmount;
+                        overpricedCount += 1;
+                    }
+
+                    if (SUSPICIOUS_KEYWORDS.some(keyword => normalized.includes(keyword))) {
+                        if (status === 'normal') status = 'extra';
+                        reason = 'Suspicious fee or miscellaneous charge';
+                        suspiciousCount += 1;
+                    }
+
+                    if (isSuspiciousRoundNumber(item.price) && status === 'normal') {
+                        status = 'extra';
+                        reason = 'Suspicious flat fee';
+                        suspiciousCount += 1;
+                    }
+
+                    if (expectedItems.length > 0 && !expectedItems.some(expected => normalized.includes(expected))) {
+                        if (status === 'normal') {
+                            status = 'extra';
+                            reason = 'Not listed in expected items';
+                        }
+                        diagnosisMismatchCount += 1;
+                    }
+
+                    if (diagnosis && diagnosisExpected.length > 0 && !diagnosisExpected.some(expected => normalized.includes(expected))) {
+                        if (status === 'normal') {
+                            status = 'extra';
+                            reason = 'Not aligned with the selected diagnosis';
+                        }
+                        diagnosisMismatchCount += 1;
+                    }
+
+                    itemsWithStatus.push({
+                        name: item.name,
+                        price: item.price,
+                        count: item.count,
+                        status,
+                        reason,
+                        expectedMax: range ? range.max : null
+                    });
+
+                    priceComparisons.push({
+                        name: item.name,
+                        price: item.price,
+                        min: range ? range.min : null,
+                        max: range ? range.max : null,
+                        overcharge: overchargeAmount
+                    });
+                }
+
+                if (duplicateCount > 0) {
+                    issues.push({ text: `Detected ${duplicateCount} duplicate item${duplicateCount > 1 ? 's' : ''}.` });
+                }
+                if (overpricedCount > 0) {
+                    issues.push({ text: `Found ${overpricedCount} overpriced item${overpricedCount > 1 ? 's' : ''}.` });
+                }
+                if (diagnosisMismatchCount > 0) {
+                    issues.push({ text: `Detected ${diagnosisMismatchCount} possible diagnosis/expected item mismatch${diagnosisMismatchCount > 1 ? 'es' : 's'}.` });
+                }
+
+                const score = Math.max(0, Math.min(100,
+                    20 * (suspiciousCount > 0 ? 1 : 0)
+                    + 20 * (duplicateCount > 0 ? 1 : 0)
+                    + 30 * (overpricedCount > 0 ? 1 : 0)
+                    + 10 * Math.min(2, diagnosisMismatchCount)
+                    + Math.min(20, Math.round(totalOvercharge / 1000))
+                ));
+
+                const riskLevel = score >= 70 ? '<strong style="color:#f44336">High Risk</strong>'
+                    : score >= 40 ? '<strong style="color:#ff9800">Medium Risk</strong>'
+                    : '<strong style="color:#4caf50">Low Risk</strong>';
 
                 currentAnalysisData = {
                     totalBilled,
                     totalOvercharge,
                     overpricedCount,
-                    fraudScore,
+                    duplicateCount,
+                    suspiciousCount,
+                    diagnosisMismatchCount,
+                    fraudScore: score,
                     riskLevel,
-                    reasons: issues.map(i => i.text),
+                    reasons: issues.length ? issues.map(i => i.text) : ['No major issues detected.'],
                     itemsWithStatus,
-                    priceComparisons,
                     issues,
-                    duplicateCount: uniqueDuplicates.length,
-                    suspiciousCount: suspicious.length,
-                    diagnosisMismatchCount: diagnosisMismatch.length
+                    priceComparisons
                 };
 
+                // ✅ show UI
                 displayResults(currentAnalysisData);
                 document.getElementById('loading').classList.remove('active');
                 document.getElementById('results').classList.add('active');
+
+                // ✅ send to backend (ONLY HERE)
+                fetch("http://localhost:5000/save-bill", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(currentAnalysisData)
+                })
+                    .then(res => res.json())
+                    .then(data => console.log("Saved:", data))
+                    .catch(err => console.error("Error:", err));
+
             }, 100);
         }
+
+
+     
 
         function displayResults(data) {
             document.getElementById('fraudScore').textContent = data.fraudScore;
@@ -587,9 +612,9 @@ X-Ray"></textarea>
             }
         }
 
-        function switchTab(tabName) {
+        function switchTab(tabName, event) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            event.target.classList.add('active');
+            if (event && event.target) event.target.classList.add('active');
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             document.getElementById(`${tabName}Tab`).classList.add('active');
         }
